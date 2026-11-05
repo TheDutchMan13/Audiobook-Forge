@@ -1,0 +1,14 @@
+Audiobook Forge turns ebooks (EPUB, PDF, Word, text, Markdown, web pages) into audiobooks with
+chapters, using the Kokoro voice on your graphics card.
+
+What it needs
+- Windows 10 or 11, 64-bit.
+- An AMD Radeon RX 9000 series graphics card (RX 9070 XT, RX 9070, RX 9060 XT) with a recent
+  AMD Software: Adrenalin Edition driver. The voice runs on that card through AMD ROCm.
+  On other graphics cards it still works, but on the processor, which is many times slower.
+- About 7 GB of disk space for the program, plus room for the books you convert
+  (about 0.4 GB per hour of audio while converting).
+- An internet connection the first time a voice is used, to download it (a few MB each).
+
+Install it in a folder whose path has no spaces (the default, C:\Audiobook-Forge, is fine).
+Finished audiobooks are saved in the "output" folder inside it unless you choose another folder.

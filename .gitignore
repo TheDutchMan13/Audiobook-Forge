@@ -1,0 +1,23 @@
+# Runtime and large generated folders (created on the PC, never committed)
+runtime/
+models/
+work/
+output/
+logs/
+bin/
+voices/
+casting/
+__pycache__/
+*.pyc
+*.wav
+*.mp3
+*.m4b
+*.npy
+bench/
+
+# Personal data and settings
+settings.json
+pronunciations.json
+*.epub
+*.pdf
+*.docx
