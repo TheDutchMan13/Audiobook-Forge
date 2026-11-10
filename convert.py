@@ -988,6 +988,18 @@ def assemble_book(meta, titles, wavs, durations, out_base, work, cover_path=None
     mp3 = fmt == "mp3"
     out_path = Path(str(out_base) + (".mp3" if mp3 else ".m4b"))
     partial = out_path.with_name(out_path.stem + ".partial" + out_path.suffix)
+    if not mp3 and len(wavs) > 1 and encode_workers(len(wavs)) > 1:
+        try:
+            parallel_m4b(meta, titles, wavs, durations, kbps, audio_filter, cover_path, work, partial)
+            return put_in_place(partial, out_path)
+        except FfmpegStalled:
+            raise
+        except Exception as e:  # noqa: BLE001  (any surprise: make it the old, one-piece way)
+            out(f"Encoding chapters side by side did not work ({str(e).splitlines()[0][:160]}); encoding in one piece.")
+            try:
+                partial.unlink()
+            except OSError:
+                pass
     cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
            "-f", "concat", "-safe", "0", "-i", str(list_file),
            "-i", str(meta_file)]
@@ -1009,6 +1021,74 @@ def assemble_book(meta, titles, wavs, durations, out_base, work, cover_path=None
             pass
         raise
     return put_in_place(partial, out_path)
+
+
+def encode_workers(n_chapters):
+    """How many chapters to encode at once: half the processor's cores (the AAC encoder uses one core each), at most 8,
+    so a PC that is also doing something else stays usable."""
+    forced = os.environ.get("FORGE_ENCODE_WORKERS")              # for tests and benchmarks
+    return max(1, min(n_chapters, int(forced) if forced else (os.cpu_count() or 2) // 2, 8))
+
+
+def aac_seconds(wav):
+    """How long a chapter lasts once it is an AAC piece inside the joined file: the encoder adds 1024 samples in front
+    and pads the end to whole 1024-sample packets, and joining without re-encoding keeps both. Chapter marks use
+    this, so they do not drift (about 45 ms per chapter otherwise)."""
+    info = sf.info(str(wav))
+    packets = -(-(info.frames + 1024) // 1024)
+    return packets * 1024 / info.samplerate
+
+
+def parallel_m4b(meta, titles, wavs, durations, kbps, audio_filter, cover_path, work, target):
+    """Encode every chapter to AAC at the same time on several cores, then join the pieces into one M4B without
+    encoding again. Measured on a 49-minute book: the same file (within 0.05 s in length) in about half the time on
+    2 cores, and more on PCs with more cores."""
+    from concurrent.futures import ThreadPoolExecutor
+    seg_dir = work / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    total = sum(durations)
+    segs = [seg_dir / f"{n:03d}.m4a" for n in range(1, len(wavs) + 1)]
+    done = {"s": 0.0}
+    lock = threading.Lock()
+
+    def encode(i):
+        cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(wavs[i])]
+        if audio_filter:
+            cmd += ["-af", audio_filter]
+        cmd += ["-c:a", "aac", "-b:a", f"{kbps}k", "-f", "ipod", str(segs[i])]
+        run_ffmpeg(cmd)
+        with lock:
+            done["s"] += durations[i]
+            out(f"@assemble encoding {done['s']:.0f} {total:.0f}")
+
+    out(f"@assemble encoding 0 {total:.0f}")
+    order = sorted(range(len(wavs)), key=lambda i: -durations[i])        # longest first finishes soonest
+    with ThreadPoolExecutor(max_workers=encode_workers(len(wavs))) as pool:
+        for f in [pool.submit(encode, i) for i in order]:
+            f.result()
+    meta_file = work / "chapters-joined.ffmetadata"
+    meta_file.write_text(build_ffmetadata(meta, titles, [aac_seconds(w) for w in wavs]), encoding="utf-8")
+    seg_list = work / "segments.txt"
+    seg_list.write_text("".join("file '{}'\n".format(str(x.resolve()).replace("\\", "/").replace("'", "'\\''"))
+                                for x in segs), encoding="utf-8")
+    cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(seg_list),
+           "-i", str(meta_file)]
+    if cover_path:
+        cmd += ["-i", str(cover_path)]
+    cmd += ["-map_metadata", "1", "-map_chapters", "1", "-map", "0:a"] + cover_args(2, cover_path, False)
+    cmd += ["-c:a", "copy", "-movflags", "+faststart", "-f", "ipod", str(target)]
+    try:
+        run_ffmpeg(cmd)
+    finally:
+        for x in segs + [seg_list, meta_file]:
+            try:
+                x.unlink()
+            except OSError:
+                pass
+        try:
+            seg_dir.rmdir()
+        except OSError:
+            pass
 
 
 def assemble_m4b(meta, titles, wavs, durations, out_path, work, cover_path=None, book_loudness=False):

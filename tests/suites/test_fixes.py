@@ -106,4 +106,37 @@ spoken = {l.split("\t")[0] for l in Path("spoken.log").read_text().splitlines()}
 ok(r.returncode == 0 and "little dialogue" in r.stdout and spoken == {"af_heart"},
    f"a non-fiction book keeps quotations in the narrator's voice: {spoken}")
 
+# ---------------------------------------------------------------- batch C: faster assembly
+import numpy as np, soundfile as sf
+sr = 24000
+wavs, durs = [], []
+Path("asm").mkdir(exist_ok=True)
+for i in range(5):
+    secs = 20 + 7 * i
+    t = np.arange(secs * sr) / sr
+    a = (0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32); a[:sr // 2] = 0; a[-sr // 2:] = 0
+    w = Path(f"asm/{i + 1:02d}.wav"); sf.write(w, a, sr, subtype="PCM_16"); wavs.append(w); durs.append(secs)
+from covers import make_cover
+Path("asm/cover.jpg").write_bytes(make_cover("Asm Test", "Me"))
+os.environ["FORGE_ENCODE_WORKERS"] = "3"
+import importlib, io, contextlib
+importlib.reload(convert)
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    path = convert.assemble_book({"title": "Asm Test", "creator": "Me"}, [f"Part {i}" for i in range(1, 6)], wavs, durs,
+                                 Path("asm/Asm Test"), Path("asm"), Path("asm/cover.jpg"),
+                                 dict(convert.DEFAULT_OPTIONS, book_loudness=True))
+info = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_chapters", "-show_entries", "format=duration:stream=codec_type",
+                                  "-of", "json", str(path)], capture_output=True, text=True).stdout)
+ok("Encoding chapters side by side did not work" not in buf.getvalue() and len(info["chapters"]) == 5
+   and any(st["codec_type"] == "video" for st in info["streams"]), "chapters encoded side by side: 5 chapter marks and the cover")
+ok(abs(float(info["format"]["duration"]) - sum(durs)) < 0.5, f"length matches the chapters ({info['format']['duration']} s for {sum(durs)} s)")
+subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(path), "-ar", str(sr), "-ac", "1", "asm/back.wav"])
+back, _ = sf.read("asm/back.wav")
+onsets = [np.argmax(np.abs(back[int(float(c["start_time"]) * sr):][:sr]) > 0.05) / sr for c in info["chapters"]]
+ok(max(onsets) - min(onsets) < 0.01 and all(0.45 < o < 0.6 for o in onsets), f"chapter marks do not drift: {[round(o, 3) for o in onsets]}")
+ok(not list(Path("asm").glob("segments*")) and not list(Path("asm").glob("*.partial.*")), "the encoded pieces are cleaned up")
+ok("@assemble encoding" in buf.getvalue(), "progress is reported while chapters are encoded")
+os.environ.pop("FORGE_ENCODE_WORKERS")
+
 print(f"{sum(res)} passed, {len(res) - sum(res)} failed")
