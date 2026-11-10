@@ -617,7 +617,6 @@ class App:
         self.voice_box.bind("<<ComboboxSelected>>", lambda e: self.persist())
         self.preview_btn = ttk.Button(vrow, text="▶ Hear it", command=self.preview_voice)
         self.preview_btn.pack(side="left", padx=(8, 0))
-        ttk.Button(vrow, text="Mix...", command=self.open_mixer).pack(side="left", padx=(6, 0))
         self.preview_lbl = ttk.Label(self.settings_card, text="", foreground="gray")
         self.preview_lbl.pack(anchor="w", pady=(0, 6))
         ttk.Label(self.settings_card, text="Voice for quoted speech").pack(anchor="w")
@@ -630,9 +629,9 @@ class App:
                             values=[SAME_VOICE, AUTO_VOICES, CAST_VOICES] + list(VOICES.values()), state="readonly")
         self.dialogue_box = dbox
         dbox.pack(side="left", fill="x", expand=True)
-        dbox.bind("<<ComboboxSelected>>", lambda e: self.persist())
+        dbox.bind("<<ComboboxSelected>>", lambda e: (self.persist(), self.show_cast_button()))
         self.cast_btn = ttk.Button(drow, text="Cast...", command=self.cast_characters)
-        self.cast_btn.pack(side="left", padx=(8, 0))
+        self.show_cast_button()
         srow = ttk.Frame(self.settings_card)
         srow.pack(fill="x")
         ttk.Label(srow, text="Speed").pack(side="left")
@@ -648,12 +647,19 @@ class App:
         ttk.Button(orow, text="Change...", command=self.choose_out).pack(side="left", padx=(8, 0))
         pfrow = ttk.Frame(self.settings_card)
         pfrow.pack(fill="x", pady=(10, 0))
-        self.pron_btn = ttk.Button(pfrow, text="Pronunciation fixes...", command=self.open_pronunciations)
-        self.pron_btn.pack(side="left")
-        self.names_btn = ttk.Button(pfrow, text="Check names...", command=self.check_names)
-        self.names_btn.pack(side="left", padx=(8, 0))
+        # the less used tools sit in one menu, so the card stays short and nothing is cut off on a scaled screen
+        self.more_btn = ttk.Menubutton(pfrow, text="More \u25BE")
+        more = tk.Menu(self.more_btn, tearoff=0)
+        more.add_command(label="Pronunciation fixes...", command=self.open_pronunciations)
+        more.add_command(label="Check names in this book...", command=self.check_names)
+        more.add_separator()
+        more.add_command(label="Cast characters...", command=self.cast_characters)
+        more.add_command(label="Mix a voice...", command=self.open_mixer)
+        self.more_btn["menu"] = more
+        self.more_btn.pack(side="left")
+        ttk.Label(pfrow, text="Pronunciation fixes:", foreground="gray").pack(side="left", padx=(10, 0))
         self.pron_lbl = ttk.Label(pfrow, text="", foreground="gray")
-        self.pron_lbl.pack(side="left", padx=(8, 0))
+        self.pron_lbl.pack(side="left", padx=(4, 0))
         self.update_pron_label()
         self.on_speed()
 
@@ -693,6 +699,13 @@ class App:
         self.overlay_sub = tk.Label(inner, text="One book opens it. Several books make a queue.")
         self.overlay_sub.pack(pady=(8, 0))
         self.overlay_inner = inner
+
+    def show_cast_button(self):
+        """Cast... next to the quoted-speech choice only when each character gets their own voice."""
+        if self.dialogue_var.get() == CAST_VOICES:
+            self.cast_btn.pack(side="left", padx=(8, 0))
+        else:
+            self.cast_btn.pack_forget()
 
     def build_ready_view(self):
         v = ttk.Frame(self.right)
