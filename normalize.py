@@ -223,7 +223,7 @@ def normalize_text(text):
     t = re.sub(r"(\d)\s?[x×]\s?(\d)", r"\1 by \2", t)
     t = re.sub(r"~\s?(\d)", r"about \1", t)
     # Roman numerals: Chapter IV, World War II, Henry VIII
-    t = re.sub(rf"\b({NUMBERED_WORDS})\s({ROMAN_RE})\b(?![\w'])",
+    t = re.sub(rf"\b((?i:{NUMBERED_WORDS}))\s({ROMAN_RE})\b(?![\w'])",
                lambda m: f"{m.group(1)} {roman_to_int(m.group(2))}" if m.group(2) else m.group(0), t)
     t = re.sub(rf"\bWorld War ({ROMAN_RE})\b", lambda m: f"World War {CARDINAL_WORDS[roman_to_int(m.group(1))]}"
                if m.group(1) and roman_to_int(m.group(1)) <= 10 else m.group(0), t)
@@ -337,6 +337,7 @@ def known_word(word):
     if not lx:
         return None
     lex, ctx = lx
+    word = word.replace("\u2019", "'").replace("\u2018", "'")   # the dictionary spells "I'm", books often "I’m"
     for w in (word, word.lower(), word.capitalize()):
         try:
             if w in lex.golds or w in lex.silvers or lex.get_word(w, None, None, ctx)[0]:
@@ -351,8 +352,8 @@ def _shout(m):
     plain = w.replace("’", "'")
     if w in KEEP_CAPS or len(plain.replace("'", "")) < 2:
         return w
-    if re.fullmatch(ROMAN_RE, w) and len(w) <= 4:
-        return w                                    # Part IV, Henry VIII
+    if w and re.fullmatch(ROMAN_RE, w):
+        return w                                    # Part IV, Henry VIII, Louis XVIII (read as numbers later)
     lx = _lexicon()
     if lx and w in lx[0].golds:
         return w                                    # the dictionary already knows how to say it in capitals

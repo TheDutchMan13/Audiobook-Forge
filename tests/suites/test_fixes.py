@@ -199,4 +199,29 @@ for t in ("part0001", "51248-0012", "Pages", "index_split_003", "text00012.xhtml
     ok(epub_reader.junk_title(t), f"{t!r} is recognised as a file name")
 ok(not any(epub_reader.junk_title(t) for t in ("Chapter 1", "1984", "Prologue", "Part One", "The Long Night")), "real titles are kept")
 
+# ---------------------------------------------------------------- batch F: speed settings
+saved = []
+orig_save = g.save_settings
+g.save_settings = lambda d: saved.append(dict(d))
+fa = types.SimpleNamespace(settings={}, total_audio_sec=3600.0, active_seconds=lambda: 100.0)
+g.App.remember_speed(fa)
+ok(fa.settings["measured_x"] == 36.0, f"the real speed of a finished book is remembered: {fa.settings}")
+fa.total_audio_sec, fa.active_seconds = 3600.0, (lambda: 200.0)
+g.App.remember_speed(fa)
+ok(fa.settings["measured_x"] == 28.8, f"and smoothed over books: {fa.settings['measured_x']}")
+ok(g.App.speed_x(fa) == 28.8 and g.App.speed_x(types.SimpleNamespace(settings={})) == g.SPEED_X, "estimates use the measured speed")
+g.save_settings = orig_save
+ok(not any(k == "fast" for k, *_ in g.SPEED_OPTIONS) and all("experimental" not in l.lower() for _, l, *_ in g.SPEED_OPTIONS),
+   "faster mode (no gain) is no longer offered and the speed options are not called experimental")
+
+# ---------------------------------------------------------------- batch G: listening report words and numerals
+import normalize
+ok(all(normalize.known_word(w) for w in ("I\u2019m", "don\u2019t", "didn\u2019t", "she\u2019d")),
+   "words with a curly apostrophe are found in the dictionary (no longer 'unfamiliar')")
+ok(convert.unfamiliar_words("I\u2019m sure she didn\u2019t see Rocky\u2019s Astrophage.", {}) == ["Astrophage"],
+   "the listening report only lists really unfamiliar words")
+o = {"normalize": True, "shouting": True, "clutter": True, "heteronyms": True}
+ok(normalize.prepare("Louis XVIII ruled.", o) == "Louis the Eighteenth ruled." and normalize.prepare("CHAPTER XVIII", o) == "chapter 18",
+   "long Roman numerals are read as numbers, also in capitals")
+
 print(f"{sum(res)} passed, {len(res) - sum(res)} failed")
