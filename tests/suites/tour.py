@@ -20,6 +20,9 @@ g.messagebox.askyesno = lambda *a, **k: (notes.append(("ask", a[1] if len(a) > 1
 save_as = {"path": None}
 g.filedialog.asksaveasfilename = lambda **k: save_as["path"]
 g.filedialog.askopenfilename = lambda **k: save_as["path"]
+json.dump({"books": [str(Path("books/story.txt").resolve()), str(Path("books/round.txt").resolve())], "next": 0,
+           "failed": [], "saved": "2026-11-10 03:00"}, open("queue.json", "w"))
+answers["yes"] = True
 app = g.App(root)
 app.run_system_command = lambda cmd: commands.append(cmd)
 def shot(name):
@@ -32,6 +35,9 @@ def check(cond, msg):
     print(("PASS " if cond else "FAIL ") + msg, flush=True)
 progress_seen = {}
 steps = [
+    (lambda: not app.loading_batch and app.view == "batch", lambda: (answers.__setitem__("yes", False),
+        check(any("did not finish" in n[1] for n in notes) and len(app.batch) == 2, f"an unfinished queue is offered at start and put back: {len(app.batch)}"),
+        app.clear_queue(), app.batch.clear(), app.show_view("ready"))),
     # 1. a PDF loads into chapters
     (500, lambda: app.load_book("books/plain.pdf")),
     (400, lambda: (check(len(app.chapters) == 4 and app.title_lbl.cget("text") == "PDF Test Book", f"PDF loaded: {len(app.chapters)} chapters"), shot("01_pdf_loaded"))),
@@ -225,8 +231,11 @@ steps = [
               check(json.loads(Path(app.report_path).read_text()).get("check", {}).get("checked", 0) >= 3, "the check is saved with the book's report"),
               close_dialogs())),
     # queue: the first book cannot start, the second converts, and the failed one can be retried
-    (300, lambda: (app.set_batch([Path("books/round.txt").resolve(), Path("books/report.txt").resolve()]), break_next_start())),
-    (lambda: not app.loading_batch and app.view == "batch", lambda: app.start_batch()),
+    (300, lambda: (answers.__setitem__("yes", True), notes.clear(),
+                   app.set_batch([Path("books/round.txt").resolve(), Path("books/report.txt").resolve()]), break_next_start())),
+    (lambda: not app.loading_batch and app.view == "batch", lambda: (answers.__setitem__("yes", False),
+        check(any("converted before" in n[1] for n in notes), "books converted before are pointed out when queued again"),
+        app.start_batch())),
     (lambda: app.view == "done" and not app.running, lambda: (shot("38_queue_summary"),
         check([r[1] is None for r in app.batch_results] == [True, False], f"the queue went on after a book failed: {[(r[0], bool(r[1]), r[2]) for r in app.batch_results]}"),
         check("could not start" in (app.batch_results[0][2] or ""), "the summary says why it failed"),

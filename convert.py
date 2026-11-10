@@ -80,7 +80,7 @@ PLAN_VERSION = "3"        # part of the cache fingerprint: bump when the way cha
 PIECE_VERSION = "1"       # part of each paragraph's cache key
 FFMPEG_STALL = int(os.environ.get("FORGE_FFMPEG_STALL", "300"))       # ffmpeg making no progress for this long has hung (a hidden dialog, a dead disk...)
 WORKER_STALL = 20 * 60    # the second converter silent this long has hung
-OUTPUTS_FILE = HERE / "logs" / "outputs.json"   # finished audiobook -> the book file it was made from
+OUTPUTS_FILE = checks.OUTPUTS_FILE   # finished audiobook -> the book file it was made from
 BOOK_LUFS = -19.0         # whole-book loudness (audiobook stores ask for about -18 to -23 dB RMS, peaks under -3 dB)
 LETTERS_PER_SEC = 12.0    # typical Kokoro pace at speed 1.0, for the quality self-check
 DEFAULT_OPTIONS = {
@@ -790,25 +790,16 @@ def run_ffmpeg(cmd, total=None, label=None, stall=None):
 
 
 # --------------------------------------------------------------------------------------- finished files
-def source_id(book):
-    """Identifies the book file an audiobook was made from (name and size, so a moved folder still matches)."""
-    p = Path(book)
-    try:
-        return f"{p.name}|{p.stat().st_size}"
-    except OSError:
-        return p.name
-
-
-def load_outputs():
-    try:
-        return json.loads(OUTPUTS_FILE.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return {}
+source_id = checks.source_id
+load_outputs = checks.load_outputs
 
 
 def remember_output(path, book):
     data = load_outputs()
-    data[str(Path(path).resolve()).lower()] = source_id(book)
+    key = str(Path(path).resolve())
+    for k in [k for k in data if k.lower() == key.lower()]:
+        del data[k]
+    data[key] = source_id(book)
     try:
         OUTPUTS_FILE.parent.mkdir(exist_ok=True)
         tmp = OUTPUTS_FILE.with_suffix(".tmp")
@@ -825,7 +816,7 @@ def output_ext(fmt):
 def pick_output(out_base, fmt, book):
     """out_base, or "out_base (2)", "(3)"... so an audiobook made from a different book file is never replaced.
     Two books can carry the same title (a mislabelled EPUB once made two books write one file)."""
-    known, me = load_outputs(), source_id(book)
+    known, me = {k.lower(): v for k, v in load_outputs().items()}, source_id(book)
     for n in range(1, 100):
         base = Path(str(out_base) if n == 1 else f"{out_base} ({n})")
         target = Path(str(base) + output_ext(fmt))

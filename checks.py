@@ -119,6 +119,35 @@ def is_out_of_memory(exc):
     return "out of memory" in text or "outofmemory" in text or "hiperrorouto" in text
 
 
+OUTPUTS_FILE = Path(__file__).resolve().parent / "logs" / "outputs.json"   # audiobook -> the book file it came from
+
+
+def source_id(book):
+    """Identifies the book file an audiobook was made from (name and size, so a moved folder still matches)."""
+    p = Path(book)
+    try:
+        return f"{p.name}|{p.stat().st_size}"
+    except OSError:
+        return p.name
+
+
+def load_outputs():
+    try:
+        import json
+        return json.loads(OUTPUTS_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def already_converted(book):
+    """The audiobook made earlier from this exact book file, if it still exists, else None."""
+    me = source_id(book)
+    for path, src in load_outputs().items():
+        if src == me and Path(path).exists():
+            return path
+    return None
+
+
 _FFMPEG = {}
 
 

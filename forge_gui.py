@@ -68,6 +68,7 @@ QUALITIES = {"small": (48, "Small"), "standard": (64, "Standard (recommended)"),
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0   # no console window for helpers (Windows only)
 DETACHED = 0x00000008 | 0x00000200 if os.name == "nt" else 0  # the watcher keeps running after the window closes
 PAUSE_FILE = APP_DIR / "pause-gui.flag"
+QUEUE_FILE = APP_DIR / "queue.json"       # the running queue, so it can be resumed after a crash or restart
 GUI_BUSY = APP_DIR / "gui_busy.flag"
 PASTED_DIR = APP_DIR / "pasted"
 BOOK_PATTERNS = " ".join(f"*{e}" for e in sorted(SUPPORTED))
@@ -471,8 +472,11 @@ class App:
         root.dnd_bind("<<Drop>>", self.on_drop)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(250, self.poll)
+        self.resuming = False
         if first_book:
             self.open_paths([first_book]) if Path(first_book).is_dir() else self.load_book(first_book)
+        else:
+            root.after(800, self.offer_resume)
 
     # ------------------------------------------------------------------ fonts & style
     def make_fonts(self):
@@ -1525,6 +1529,18 @@ class App:
         if len(books) == 1:
             self.load_book(books[0][0])
             return
+        if not getattr(self, "resuming", False):
+            done_before = [b for b in books if checks.already_converted(b[0])]
+            if done_before and len(done_before) < len(books):
+                books = [b for b in books if b not in done_before]
+                messagebox.showinfo("Audiobook Forge", f"{len(done_before)} of these books were converted before and are "
+                                    "left out of the queue. To convert one again, drop it on its own.")
+            elif done_before and messagebox.askyesno(
+                    "Audiobook Forge", f"All {len(books)} books were converted before. Convert them all again?"):
+                pass
+            elif done_before:
+                return
+        self.resuming = False
         self.batch = books
         self.overrides = {}
         self.book, self.meta, self.chapters = Path(books[0][0]), books[0][1], books[0][2]
@@ -1579,8 +1595,56 @@ class App:
         self.batch_results = []
         self.batch_start = time.time()
         self.batch_audio = 0.0
+        self.save_queue()
         self.prepare_batch_book()
         self.launch()
+
+    def save_queue(self):
+        """Write the queue to queue.json after every book, so a crash, a restart or closing the window loses nothing:
+        the next start offers to carry on."""
+        data = {"books": [str(b[0]) for b in self.batch], "next": self.batch_i,
+                "failed": [str(self.batch[r[3]][0]) for r in self.batch_results if not r[1] and r[3] is not None
+                           and r[3] < len(self.batch)],
+                "saved": time.strftime("%Y-%m-%d %H:%M")}
+        try:
+            tmp = QUEUE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, QUEUE_FILE)
+        except OSError:
+            pass
+
+    @staticmethod
+    def clear_queue():
+        try:
+            QUEUE_FILE.unlink()
+        except OSError:
+            pass
+
+    @staticmethod
+    def unfinished_queue():
+        """(books still to convert, saved time) from a queue that did not finish, or None."""
+        try:
+            data = json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return None
+        books = data.get("books") or []
+        left = books[int(data.get("next", 0)):]
+        left += [b for b in data.get("failed") or [] if b not in left]
+        left = [b for b in left if Path(b).exists()]
+        return (left, data.get("saved", "")) if left else None
+
+    def offer_resume(self):
+        found = self.unfinished_queue()
+        if not found or self.running or self.batch:
+            return
+        left, saved = found
+        if messagebox.askyesno("Audiobook Forge", f"The queue from {saved} did not finish: {len(left)} "
+                               f"book{'s' if len(left) != 1 else ''} still to convert. Put {'them' if len(left) != 1 else 'it'} "
+                               "back in the queue? (Finished chapters are kept, so each carries on where it stopped.)"):
+            self.resuming = True
+            self.open_paths(left)
+        else:
+            self.clear_queue()
 
     def prepare_batch_book(self):
         path, meta, chapters = self.batch[self.batch_i]
@@ -1866,9 +1930,11 @@ class App:
                 self.batch_audio += self.total_audio_sec or sum(self.durations.values()) * 60
             if self.batch_i + 1 < len(self.batch):
                 self.batch_i += 1
+                self.save_queue()
                 self.prepare_batch_book()
                 self.launch()
                 return
+            self.clear_queue()
             self.show_batch_done()
             self.notify_done(any(r[1] for r in self.batch_results))
             return
@@ -1958,10 +2024,12 @@ class App:
         """Go on with the next book of the queue, or show the summary after the last one."""
         if self.batch_i + 1 < len(self.batch):
             self.batch_i += 1
+            self.save_queue()
             self.prepare_batch_book()
             self.root.after(200, self.launch)
         else:
             self.running = False
+            self.clear_queue()
             self.show_batch_done()
             self.notify_done(any(r[1] for r in self.batch_results))
 

@@ -139,4 +139,22 @@ ok(not list(Path("asm").glob("segments*")) and not list(Path("asm").glob("*.part
 ok("@assemble encoding" in buf.getvalue(), "progress is reported while chapters are encoded")
 os.environ.pop("FORGE_ENCODE_WORKERS")
 
+# ---------------------------------------------------------------- batch D: the queue survives a restart
+import checks
+g.QUEUE_FILE = Path("queue_test.json")
+books = [Path(f"q{i}.txt") for i in range(4)]
+for b in books:
+    b.write_text("Chapter 1\n\n" + "Some words for the queue. " * 30)
+qa = types.SimpleNamespace(batch=[(str(b), {}, []) for b in books], batch_i=2,
+                           batch_results=[("q0", "x.m4b", None, 0), ("q1", None, "stalled", 1)])
+g.App.save_queue(qa)
+left, saved = g.App.unfinished_queue()
+ok([Path(x).name for x in left] == ["q2.txt", "q3.txt", "q1.txt"], f"an unfinished queue is remembered, failed books included: {left}")
+Path("q3.txt").unlink()
+ok([Path(x).name for x in g.App.unfinished_queue()[0]] == ["q2.txt", "q1.txt"], "books deleted since are left out")
+g.App.clear_queue()
+ok(g.App.unfinished_queue() is None, "a finished queue leaves nothing to resume")
+ok(checks.already_converted("bookA.txt") and not checks.already_converted("q0.txt"),
+   "books converted before are recognised by their file (so re-dropping a folder skips them)")
+
 print(f"{sum(res)} passed, {len(res) - sum(res)} failed")
