@@ -78,6 +78,9 @@ FFMPEG = find_ffmpeg()
 PAUSE_LIMIT = 6 * 3600    # a forgotten pause never blocks a conversion for more than this
 PLAN_VERSION = "3"        # part of the cache fingerprint: bump when the way chapters are spoken changes
 PIECE_VERSION = "1"       # part of each paragraph's cache key
+FFMPEG_STALL = int(os.environ.get("FORGE_FFMPEG_STALL", "300"))       # ffmpeg making no progress for this long has hung (a hidden dialog, a dead disk...)
+WORKER_STALL = 20 * 60    # the second converter silent this long has hung
+OUTPUTS_FILE = HERE / "logs" / "outputs.json"   # finished audiobook -> the book file it was made from
 BOOK_LUFS = -19.0         # whole-book loudness (audiobook stores ask for about -18 to -23 dB RMS, peaks under -3 dB)
 LETTERS_PER_SEC = 12.0    # typical Kokoro pace at speed 1.0, for the quality self-check
 DEFAULT_OPTIONS = {
@@ -169,6 +172,7 @@ def start_log(book_stem):
         path = LOG_DIR / f"{time.strftime('%Y-%m-%d %H-%M-%S')} {safe_name(book_stem)[:40]}.txt"
         _log["file"] = open(path, "a", encoding="utf-8")
         _log["file"].write(f"command: {' '.join(sys.argv[1:])}\n")
+        sys.stdout.write(f"@log {path}\n")
     except OSError:
         _log["file"] = None
 
@@ -712,42 +716,158 @@ def build_ffmetadata(meta, titles, durations):
     return "\n".join(lines) + "\n"
 
 
-def measure_lufs(list_file):
+def measure_lufs(list_file, total=None):
     """Integrated loudness of the whole book (EBU R128), or None if it cannot be measured."""
     try:
-        r = subprocess.run([FFMPEG, "-nostats", "-hide_banner", "-f", "concat", "-safe", "0", "-i", str(list_file),
-                            "-af", "ebur128=framelog=quiet", "-f", "null", "-"],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800,
-                           creationflags=NO_WINDOW)
-        found = re.findall(r"I:\s+(-?[\d.]+) LUFS", r.stderr)
+        err = run_ffmpeg([FFMPEG, "-hide_banner", "-f", "concat", "-safe", "0", "-i", str(list_file),
+                          "-af", "ebur128=framelog=quiet", "-f", "null", "-"], total=total, label="measuring")
+        found = re.findall(r"I:\s+(-?[\d.]+) LUFS", err)
         value = float(found[-1]) if found else None
         return value if value is not None and value > -70 else None
     except Exception:  # noqa: BLE001
         return None
 
 
-def run_ffmpeg(cmd):
-    """Run an ffmpeg command; a failure becomes a plain explanation that says what to do."""
+class FfmpegStalled(RuntimeError):
+    pass
+
+
+def run_ffmpeg(cmd, total=None, label=None, stall=None):
+    """Run an ffmpeg command and return what it wrote to stderr. It is watched: progress goes to the window
+    ("@assemble <label> <seconds done> <seconds total>" when total is known), and if it makes no progress at all
+    for FFMPEG_STALL seconds (a hidden error dialog, a disk that stopped answering) it is stopped instead of
+    waiting for ever. A failure becomes a plain explanation that says what to do."""
+    stall = FFMPEG_STALL if stall is None else stall
+    cmd = [cmd[0], "-nostdin", "-progress", "pipe:1", "-nostats"] + list(cmd[1:])
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       creationflags=NO_WINDOW)
-    except subprocess.CalledProcessError as e:
-        code = e.returncode & 0xFFFFFFFF
-        detail = (e.stderr or "").strip()[-600:]
-        hint = {0xC0000135: "ffmpeg could not start because some of its files (DLLs) are missing.",
-                0xC000013A: "ffmpeg was stopped from outside (closed, cancelled, or the PC went to sleep)."}.get(code, "")
-        raise RuntimeError(f"ffmpeg failed (code {code:#x}). {hint} {detail}".strip()) from None
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                                errors="replace", creationflags=NO_WINDOW)
     except FileNotFoundError:
         raise RuntimeError("ffmpeg was not found. Install it (winget install Gyan.FFmpeg) or put ffmpeg.exe and its "
                            "DLL files in the bin folder.") from None
+    err, state = [], {"seen": time.time(), "done": 0.0}
+
+    def drain():
+        for line in proc.stderr:
+            err.append(line)
+            if len(err) > 400:
+                del err[:100]
+
+    def read():
+        for line in proc.stdout:
+            state["seen"] = time.time()
+            if line.startswith("out_time_us="):
+                try:
+                    state["done"] = max(0.0, int(line.split("=", 1)[1]) / 1e6)
+                except ValueError:
+                    pass
+    threads = [threading.Thread(target=drain, daemon=True), threading.Thread(target=read, daemon=True)]
+    for t in threads:
+        t.start()
+    shown = 0.0
+    while proc.poll() is None:
+        time.sleep(0.25)
+        if time.time() - state["seen"] > stall:
+            proc.kill()
+            proc.wait()
+            raise FfmpegStalled(f"ffmpeg stopped responding while {label or 'making the audiobook'}: no progress for "
+                                f"{stall // 60} minutes, so it was stopped. Finished chapters are kept; converting "
+                                "again carries on from there.")
+        if total and label and time.time() - shown > 1.5:
+            shown = time.time()
+            out(f"@assemble {label} {state['done']:.0f} {total:.0f}")
+    for t in threads:
+        t.join(5)
+    text = "".join(err)
+    if proc.returncode != 0:
+        code = proc.returncode & 0xFFFFFFFF
+        hint = {0xC0000135: "ffmpeg could not start because some of its files (DLLs) are missing.",
+                0xC000013A: "ffmpeg was stopped from outside (closed, cancelled, or the PC went to sleep)."}.get(code, "")
+        raise RuntimeError(f"ffmpeg failed (code {code:#x}). {hint} {text.strip()[-600:]}".strip())
+    if total and label:
+        out(f"@assemble {label} {total:.0f} {total:.0f}")
+    return text
 
 
-def book_filter(list_file, opts):
+# --------------------------------------------------------------------------------------- finished files
+def source_id(book):
+    """Identifies the book file an audiobook was made from (name and size, so a moved folder still matches)."""
+    p = Path(book)
+    try:
+        return f"{p.name}|{p.stat().st_size}"
+    except OSError:
+        return p.name
+
+
+def load_outputs():
+    try:
+        return json.loads(OUTPUTS_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def remember_output(path, book):
+    data = load_outputs()
+    data[str(Path(path).resolve()).lower()] = source_id(book)
+    try:
+        OUTPUTS_FILE.parent.mkdir(exist_ok=True)
+        tmp = OUTPUTS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, OUTPUTS_FILE)
+    except OSError:
+        pass
+
+
+def output_ext(fmt):
+    return {"mp3": ".mp3", "mp3_chapters": ""}.get(fmt, ".m4b")
+
+
+def pick_output(out_base, fmt, book):
+    """out_base, or "out_base (2)", "(3)"... so an audiobook made from a different book file is never replaced.
+    Two books can carry the same title (a mislabelled EPUB once made two books write one file)."""
+    known, me = load_outputs(), source_id(book)
+    for n in range(1, 100):
+        base = Path(str(out_base) if n == 1 else f"{out_base} ({n})")
+        target = Path(str(base) + output_ext(fmt))
+        if not target.exists() or known.get(str(target.resolve()).lower()) == me:
+            return base
+    return Path(f"{out_base} {time.strftime('%Y%m%d-%H%M%S')}")
+
+
+def put_in_place(partial, target):
+    """Move the finished file (or folder) over the old one. A player holding the old file open on Windows makes
+    that fail; then the new one keeps a "(new)" name instead of being lost."""
+    partial, target = Path(partial), Path(target)
+    for attempt in range(5):
+        try:
+            if partial.is_dir():
+                old = None
+                if target.exists():
+                    old = target.with_name(target.name + ".old")
+                    import shutil
+                    shutil.rmtree(old, ignore_errors=True)
+                    os.replace(target, old)
+                os.replace(partial, target)
+                if old is not None:
+                    import shutil
+                    shutil.rmtree(old, ignore_errors=True)
+            else:
+                os.replace(partial, target)
+            return target
+        except PermissionError:
+            time.sleep(1 + attempt)
+    alt = target.with_name(f"{target.stem} (new){target.suffix}")
+    os.replace(partial, alt)
+    out(f"The old {target.name} is open in another program, so the new audiobook was saved as {alt.name}.")
+    return alt
+
+
+def book_filter(list_file, opts, total=None):
     """Pass 1 of the loudness standard: measure the whole book. Returns the ffmpeg filter for pass 2
     (one gain for the whole book plus a peak limit), or None."""
     if not opts.get("book_loudness"):
         return None
-    lufs = measure_lufs(list_file)
+    lufs = measure_lufs(list_file, total)
     if lufs is None:
         out("Could not measure the book's loudness; keeping it as it is.")
         return None
@@ -833,12 +953,17 @@ def assemble_book(meta, titles, wavs, durations, out_base, work, cover_path=None
     list_file.write_text(
         "".join("file '{}'\n".format(str(w.resolve()).replace("\\", "/").replace("'", "'\\''")) for w in wavs),
         encoding="utf-8")
-    audio_filter = book_filter(list_file, opts)
+    total = sum(durations)
+    audio_filter = book_filter(list_file, opts, total)
     filt = ["-af", audio_filter] if audio_filter else []
 
     if fmt == "mp3_chapters":            # a folder with one MP3 per chapter, numbered, plus a playlist
-        folder = Path(str(out_base))
+        target = Path(str(out_base))
+        folder = Path(str(out_base) + ".partial")
+        import shutil
+        shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir(parents=True, exist_ok=True)
+        done_before = 0.0
         names = []
         for n, (wav, title) in enumerate(zip(wavs, titles), 1):
             name = f"{n:02d} - {safe_name(title)[:60]}.mp3"
@@ -853,13 +978,16 @@ def assemble_book(meta, titles, wavs, durations, out_base, work, cover_path=None
                     "-metadata", "genre=Audiobook", str(folder / name)]
             run_ffmpeg(cmd)
             names.append(name)
+            done_before += durations[n - 1]
+            out(f"@assemble encoding {done_before:.0f} {total:.0f}")
         (folder / f"{safe_name(meta.get('title') or 'book')}.m3u").write_text(
             "#EXTM3U\n" + "".join(f"#EXTINF:{int(d)},{t}\n{nm}\n" for nm, t, d in zip(names, titles, durations)),
             encoding="utf-8")
-        return folder
+        return put_in_place(folder, target)
 
     mp3 = fmt == "mp3"
     out_path = Path(str(out_base) + (".mp3" if mp3 else ".m4b"))
+    partial = out_path.with_name(out_path.stem + ".partial" + out_path.suffix)
     cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
            "-f", "concat", "-safe", "0", "-i", str(list_file),
            "-i", str(meta_file)]
@@ -867,13 +995,20 @@ def assemble_book(meta, titles, wavs, durations, out_base, work, cover_path=None
         cmd += ["-i", str(cover_path)]
     cmd += ["-map_metadata", "1", "-map_chapters", "1", "-map", "0:a"] + cover_args(2, cover_path, mp3) + filt
     if mp3:
-        cmd += ["-c:a", "libmp3lame", "-b:a", f"{kbps}k", "-id3v2_version", "3", str(out_path)]
+        cmd += ["-c:a", "libmp3lame", "-b:a", f"{kbps}k", "-id3v2_version", "3", "-f", "mp3", str(partial)]
     else:
-        cmd += ["-c:a", "aac", "-b:a", f"{kbps}k", "-movflags", "+faststart", "-f", "ipod", str(out_path)]
-    run_ffmpeg(cmd)
-    if mp3 and cards:
-        add_chapter_pictures(out_path, cards)
-    return out_path
+        cmd += ["-c:a", "aac", "-b:a", f"{kbps}k", "-movflags", "+faststart", "-f", "ipod", str(partial)]
+    try:
+        run_ffmpeg(cmd, total=total, label="encoding")
+        if mp3 and cards:
+            add_chapter_pictures(partial, cards)
+    except BaseException:
+        try:
+            partial.unlink()
+        except OSError:
+            pass
+        raise
+    return put_in_place(partial, out_path)
 
 
 def assemble_m4b(meta, titles, wavs, durations, out_path, work, cover_path=None, book_loudness=False):
@@ -934,13 +1069,30 @@ def start_second_process():
                             stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
                             creationflags=0x08000000 if os.name == "nt" else 0)
 
+    proc.last_seen = time.time()
+
     def relay():
         for line in proc.stdout:
+            proc.last_seen = time.time()
             line = line.rstrip()
-            if line and not line.startswith("WARNING: Defaulting repo_id"):
+            if line and not line.startswith(("WARNING: Defaulting repo_id", "@log ")):
                 out(line)
     threading.Thread(target=relay, daemon=True).start()
     return proc
+
+
+def wait_for_second(proc, pause_file=None):
+    """Wait for the second converter, but not for ever: silent for WORKER_STALL (not paused) means it hung.
+    Its unfinished chapters are then spoken by this process."""
+    while proc.poll() is None:
+        time.sleep(2)
+        if pause_file and os.path.exists(pause_file):
+            proc.last_seen = time.time()
+        elif time.time() - proc.last_seen > WORKER_STALL:
+            out(f"The second converter stopped responding for {WORKER_STALL // 60} minutes; its chapters are finished here.")
+            proc.kill()
+            proc.wait()
+            return
 
 
 def exit_when_parent_goes():
@@ -1130,6 +1282,17 @@ def make_sample(args, chapters, picked, opts, compiled, guesser, speaker):
     out(f"Sample of chapter {idx} ({sample.words} words) -> {target.resolve()}")
 
 
+def title_mismatch(title, stem):
+    """True when the title inside a book has nothing to do with its file name ("One Year After" inside
+    "One Second After by ...epub"). File names that are only numbers or codes are not compared."""
+    norm = lambda x: re.sub(r"[^a-z0-9]+", " ", x.lower()).strip()
+    t, f = norm(title), norm(stem)
+    if not t or len(re.findall(r"[a-z]{3,}", f)) < 2:
+        return False
+    return t not in f and f.split(" by ")[0].split("  ")[0] not in t and \
+        not set(re.findall(r"[a-z]{4,}", t)) <= set(re.findall(r"[a-z]{4,}", f))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("epub", help="the book file (.epub .txt .md .docx .html .pdf)")
@@ -1162,6 +1325,9 @@ def main():
         sys.exit(2)
     if args.title:
         meta["title"] = args.title
+    elif not args.worker and title_mismatch(meta.get("title", ""), epub.stem):
+        out(f"Note: this book calls itself \"{meta.get('title')}\", but its file is named \"{epub.stem}\". The audiobook "
+            "is named after the book's own title; if that is wrong, use Edit details... in the window.")
     if args.author is not None:
         meta["creator"] = args.author
     picked = parse_range(args.chapters, len(chapters))
@@ -1303,7 +1469,7 @@ def main():
     if args.worker:
         return
     if second is not None:
-        second.wait()
+        wait_for_second(second, args.pause_file)
     for n, idx in waiting:           # the second process's chapters (spoken here if it stopped early)
         wav = audio_dir / f"{idx:02d}.wav"
         if not chapter_done(wav):
@@ -1341,10 +1507,16 @@ def main():
     title_part = safe_name(meta.get("title") or epub.stem)
     author_part = safe_name(meta["creator"]) if meta.get("creator", "").strip() else ""
     out_base = out_dir / ((f"{author_part} - " if author_part else "") + f"{title_part}{suffix}")
+    first_choice = out_base
+    out_base = pick_output(out_base, opts["format"], epub)
+    if out_base != first_choice:
+        out(f"{first_choice.name}{output_ext(opts['format'])} already exists and was made from a different book file, "
+            f"so this one is saved as {out_base.name}{output_ext(opts['format'])}.")
     out(f"@summary {sum(durs):.1f}")
     out({"mp3": "Assembling one MP3 with chapter markers...",
          "mp3_chapters": "Making one MP3 file per chapter..."}.get(opts["format"], "Assembling M4B with chapter markers..."))
     out_path = assemble_book(meta, titles, wavs, durs, out_base, work, cover_path, opts)
+    remember_output(out_path, epub)
     report_path, places = write_report(meta, picked, chapters, durations, audio_dir, out_path, epub.stem)
     if report_path:
         out(f"Listening report: {places} place{'s' if places != 1 else ''} worth a listen -> {report_path.with_suffix('.txt')}")

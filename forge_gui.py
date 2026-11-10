@@ -204,6 +204,28 @@ SPEED_OPTIONS = [
 QUALITY_OPTIONS = [(k, l, h) for k, l, h, _ in TEXT_OPTIONS + SOUND_OPTIONS]
 CHECKED, UNCHECKED = "☑", "☐"
 SPEED_X = 20     # measured realtime factor, used for estimates before real progress exists
+STALL_MINUTES = 20   # a converter that prints nothing for this long (not paused) has hung: it is stopped
+ASM_RE = re.compile(r"^@assemble (\w+) (\d+) (\d+)$")
+EXIT_CODES = {
+    0xC0000005: "the converter crashed (an access violation, usually inside the graphics driver)",
+    0xC0000409: "the converter crashed (a library stopped it on purpose after an internal error)",
+    0xC00000FD: "the converter crashed (it ran out of stack memory)",
+    0xC0000017: "the PC ran out of memory",
+    0xC000013A: "the converter was closed from outside (the PC went to sleep or shut down, or it was ended in Task Manager)",
+    0xC0000135: "a program file (DLL) is missing; run Check my setup",
+}
+
+
+def describe_exit(code):
+    """A plain reason for a converter that ended with this exit code."""
+    if code is None:
+        return "the converter stopped"
+    c = code & 0xFFFFFFFF
+    if c in EXIT_CODES:
+        return EXIT_CODES[c]
+    if c == 1:
+        return "the converter stopped with an error"
+    return f"the converter stopped unexpectedly (code {c:#x})" if c > 255 else f"the converter stopped (code {c})"
 WORDS_PER_MIN = 150
 
 
@@ -1537,6 +1559,11 @@ class App:
         self.problem = None
         self.report_path = None
         self.last_error = None
+        self.log_path = None
+        self.assembling = None       # (step, seconds done, seconds total) while the audiobook file is made
+        self.err_tail = []           # the converter's last error-output lines (shown when it crashes)
+        self.last_line_time = time.time()
+        self.stalled = False
         self.start_time = 0.0
         self.end_time = 0.0
         self.paused_total = 0.0
@@ -1593,7 +1620,7 @@ class App:
         except OSError:
             pass
         try:
-            self.proc = subprocess.Popen(cmd, cwd=APP_DIR, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            self.proc = subprocess.Popen(cmd, cwd=APP_DIR, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                          text=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW)
         except OSError as e:
             if self.batch_active:          # one book that cannot start must not stop the queue
@@ -1634,6 +1661,7 @@ class App:
         self.show_view("run")
         self.taskbar.progress(0)
         self.refresh_run()
+        threading.Thread(target=self.err_reader, args=(self.proc, self.err_tail), daemon=True).start()
         threading.Thread(target=self.reader, args=(self.proc,), daemon=True).start()
 
     def reader(self, proc):
@@ -1641,6 +1669,46 @@ class App:
             self.q.put(line.rstrip())
         proc.wait()
         self.q.put(None)
+
+    @staticmethod
+    def err_reader(proc, tail):
+        """Keep the last lines the converter wrote to its error output (library warnings, or why it crashed)."""
+        for line in proc.stderr:
+            line = line.rstrip()
+            if line and "Defaulting repo_id" not in line:
+                tail.append(line)
+                if len(tail) > 60:
+                    del tail[:20]
+
+    def check_stalled(self):
+        """A converter silent for STALL_MINUTES while not paused has hung (a stuck graphics driver, a hidden
+        dialog). Stop it so the queue moves on; finished chapters are kept for Retry."""
+        if not (self.running and self.proc) or self.paused or self.cancelled or self.stalled:
+            return
+        if time.time() - self.last_line_time > STALL_MINUTES * 60:
+            self.stalled = True
+            self.problem = (f"No progress for {STALL_MINUTES} minutes, so the conversion was stopped (the graphics card "
+                            "or ffmpeg stopped responding). Finished chapters are kept; Retry carries on from there.")
+            self.log_line(self.problem)
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+
+    def note_crash(self, code):
+        """Put the reason and the converter's last error lines into its log file (Save diagnostics includes it)."""
+        lines = [f"--- {describe_exit(code)} (exit code {(code or 0) & 0xFFFFFFFF:#x}) ---"]
+        if self.problem:
+            lines.append(self.problem)
+        lines += self.err_tail[-30:]
+        for line in lines[1:][-8:]:
+            self.log_line(line)
+        if self.log_path:
+            try:
+                with open(self.log_path, "a", encoding="utf-8") as f:
+                    f.write(time.strftime("%H:%M:%S ") + "\n".join(lines) + "\n")
+            except OSError:
+                pass
 
     def poll(self):
         try:
@@ -1659,6 +1727,7 @@ class App:
             pass
         if self.running:
             self.refresh_run()
+        self.check_stalled()
         if time.time() - self.watch_checked > 2:
             self.watch_checked = time.time()
             self.update_watch_label()
@@ -1671,7 +1740,15 @@ class App:
         self.log.config(state="disabled")
 
     def handle_line(self, line):
+        self.last_line_time = time.time()
         if line.startswith("WARNING: Defaulting repo_id"):
+            return
+        if line.startswith("@log "):
+            self.log_path = line[5:].strip()
+            return
+        m = ASM_RE.match(line)
+        if m:
+            self.assembling = (m.group(1), int(m.group(2)), max(1, int(m.group(3))))
             return
         m = PROG_RE.match(line)
         if m:
@@ -1747,7 +1824,13 @@ class App:
             left = remaining_words / WORDS_PER_MIN * 60 / SPEED_X
             self.run_labels["speed"][1].config(text="measuring...")
         self.run_labels["left"][1].config(text=fmt_length(left / 60) if left >= 60 else "under a minute")
-        if self.paused:
+        if self.running and self.assembling and not self.paused:
+            step, done_s, total_s = self.assembling
+            frac = min(1.0, done_s / total_s)
+            what = "Measuring the book's loudness" if step == "measuring" else "Putting the audiobook file together"
+            self.run_status.config(text=f"{what}: {int(frac * 100)}%")
+            self.run_labels["left"][1].config(text="a few minutes" if frac < 0.8 else "under a minute")
+        elif self.paused:
             self.run_status.config(text="Paused. Click Resume to carry on where it stopped.")
         elif self.running and self.done:
             self.run_status.config(text=f"{len(self.done)} of {len(self.order)} chapters done, "
@@ -1768,11 +1851,16 @@ class App:
                 pass
         took = fmt_time(self.end_time - self.start_time)
         ok = code == 0 and self.last_output is not None and not self.cancelled
+        if not ok and not self.cancelled:
+            if code not in (0, 1) and not self.problem:
+                self.problem = describe_exit(code)[0].upper() + describe_exit(code)[1:] + \
+                    ". Finished chapters are kept; converting again carries on from there."
+            self.note_crash(code)
         if ok:
             self.library_dirty = True
         if self.batch_active and not self.cancelled:
             title = self.meta.get("title") or self.book.stem
-            reason = None if ok else (self.problem or self.last_error or f"stopped with code {code}")
+            reason = None if ok else (self.problem or self.last_error or describe_exit(code))
             self.batch_results.append((title, self.last_output if ok else None, reason, self.batch_i))
             if ok:
                 self.batch_audio += self.total_audio_sec or sum(self.durations.values()) * 60
@@ -1795,7 +1883,7 @@ class App:
             self.show_done(took)
             self.notify_done(True)
         else:
-            self.run_status.config(text=self.problem or f"Stopped with an error (code {code}). The details below may say why.")
+            self.run_status.config(text=self.problem or f"Stopped: {describe_exit(code)}. The details below may say why.")
             self.back_btn.pack(side="right", padx=8)
             self.diag_btn.pack(side="right")
             self.check_btn.pack(side="right", padx=(0, 8))
@@ -2123,6 +2211,7 @@ class App:
                 self.paused_total += time.time() - self.pause_started
             self.paused = False
             self.pause_started = 0.0
+            self.last_line_time = time.time()      # the stall clock starts again after a pause
         self.pause_btn.config(text="\u25B6  Resume" if self.paused else "\u23F8  Pause")
 
     def toggle_pause(self):

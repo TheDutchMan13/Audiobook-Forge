@@ -5,11 +5,13 @@ settings.json for the folder, voice, speed and save location, converts one book 
 convert.py, then moves the original into a 'done' folder (or 'failed' with a note on what went wrong).
 """
 import json
+import queue
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -23,6 +25,7 @@ SCAN_EVERY = 5          # seconds between looks at the folder
 SETTLE = 10             # a file must be this old, and unchanged, before it is converted
 STALE_STATUS = 30       # seconds without a status update = the watcher is not running
 GUI_BUSY_MAX = 12 * 3600
+STALL_MINUTES = 20      # a converter silent this long has hung
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 EXTENSIONS = {".epub", ".txt", ".md", ".markdown", ".docx", ".html", ".htm", ".pdf"}
 
@@ -103,7 +106,29 @@ def convert_one(book, settings, queued):
     proc = subprocess.Popen(cmd, cwd=HERE, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW)
     tail, output, last_write, pct = [], None, 0.0, 0
-    for line in proc.stdout:
+    lines = queue.Queue()
+
+    def read():
+        for raw in proc.stdout:
+            lines.put(raw)
+        lines.put(None)
+    threading.Thread(target=read, daemon=True).start()
+    last_seen = time.time()
+    while True:
+        try:
+            line = lines.get(timeout=5)
+        except queue.Empty:
+            if STOP_FILE.exists():
+                proc.terminate()
+            if time.time() - last_seen > STALL_MINUTES * 60 and not (HERE / "pause-watcher.flag").exists():
+                tail.append(f"No progress for {STALL_MINUTES} minutes, so the conversion was stopped "
+                            "(the graphics card or ffmpeg stopped responding).")
+                proc.kill()
+                last_seen = time.time()
+            continue
+        if line is None:
+            break
+        last_seen = time.time()
         line = line.rstrip()
         m = PROG_RE.match(line)
         if m:
