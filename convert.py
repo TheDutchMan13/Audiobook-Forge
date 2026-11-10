@@ -1349,9 +1349,16 @@ def main():
                 opts["ai_tags"] = speakers.ai_hash(ai)          # new tags -> the chapters are put together again
                 if not args.worker:
                     out(f"Using the AI speaker tags for {matched} of {len(chapters)} chapters.")
+    chosen_cast = speakers.load_cast(epub.stem, CASTING_DIR) if guesser else {}
+    if guesser and not chosen_cast and not opts.get("ai_tags") and not speakers.looks_like_fiction(chapters):
+        if not args.worker:
+            out("This book has little dialogue (it reads like non-fiction), so quotations stay in the narrator's voice. "
+                "To give them voices anyway, use Cast... in the window.")
+        opts["dialogue_voice"] = ""
+        guesser = None
     characters = []
     if opts.get("dialogue_voice") == "cast":     # each character their own voice (chosen in the window, or automatic)
-        characters = speakers.find_characters(chapters, guesser)
+        characters = speakers.find_characters(chapters, guesser, keep=chosen_cast)
         opts["cast"] = speakers.cast(characters, args.voice, opts["dialogue_female"], opts["dialogue_male"],
                                      speakers.load_cast(epub.stem, CASTING_DIR))
 

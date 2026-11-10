@@ -111,8 +111,18 @@ def _pronoun(m):
     return next(x for x in m.groups() if x).lower()
 
 
-FEMALE_POOL = ["af_nicole", "af_kore", "af_sarah", "af_aoede", "af_bella,af_sarah", "af_nicole,af_kore",
-               "af_alloy", "af_nova", "af_sky", "af_jessica", "af_river"]
+# af_nicole is left out: Kokoro's author made it as a whispering (ASMR) voice, wrong for a main character
+FEMALE_POOL = ["af_kore", "af_sarah", "af_aoede", "af_bella,af_sarah", "af_kore,af_sarah", "af_alloy",
+               "af_nova", "af_sky", "af_jessica", "af_river"]
+# titles and roles that are not a person's name when they stand alone ("the Captain said", "Ms" before a name)
+ROLE_WORDS = {"mr", "mrs", "ms", "miss", "dr", "doctor", "professor", "captain", "sir", "agent", "detective",
+              "sergeant", "general", "colonel", "officer", "president", "senator", "governor", "secretary",
+              "minister", "chairman", "commander", "admiral", "major", "lieutenant", "chief", "director", "judge",
+              "mayor", "ambassador", "representative", "congressman", "congresswoman", "commissioner", "inspector"}
+# what a sentence about one named person says about them: "she", "his eyes", "himself" (not "handed him",
+# and not "her", which is as often someone else)
+SUBJECT_F, SUBJECT_M = {"she", "hers", "herself"}, {"he", "his", "himself"}
+CONFIRM_TAGS = 2      # explicit tags ("said Rhys") needed before someone counts as a character
 MALE_POOL = ["am_fenrir", "am_puck", "am_michael", "am_michael,am_puck", "am_fenrir,am_puck", "am_michael,am_fenrir",
              "am_echo", "am_eric", "am_liam", "am_onyx", "am_adam"]
 NAME_RE = r"[A-Z][a-z][\w'\u2019-]*"
@@ -153,7 +163,10 @@ class SpeakerGuesser:
                 for title, name in re.findall(TITLE_RE.replace("(?:(", "(?:(", 1) + r"(" + NAME_RE + r")", sentence):
                     if title:
                         self.titles.setdefault(_base(name), title)
+        titles = ROLE_WORDS | FEMALE_TITLES | MALE_TITLES
         for (first, last), n in pairs.most_common():
+            if first.lower() in titles or last.lower() in titles:
+                continue                 # "Captain Lokken" is a title and a name, not a first name and a surname
             if last not in self.aliases and first not in self.aliases and \
                     (first.lower() in FEMALE_NAMES or first.lower() in MALE_NAMES or self.proper[first] >= 2):
                 self.aliases[last] = first
@@ -179,7 +192,7 @@ class SpeakerGuesser:
         """tagged: the word sits right next to a speech verb ("Cassian said"), which on its own is good evidence."""
         base = _base(word)
         low = base.lower()
-        if len(base) < 2 or low in STOP_CAPS or low in FEMALE_PRON | MALE_PRON:
+        if len(base) < 2 or low in STOP_CAPS or low in FEMALE_PRON | MALE_PRON or low in ROLE_WORDS:
             return False
         if self.lower[low] > 0.25 * max(1, self.proper[base]) and base not in self.aliases:
             return False                 # a word the book mostly writes in lowercase (like, again, rose)
@@ -200,7 +213,9 @@ class SpeakerGuesser:
                     continue
                 names = {_base(w) for i, w in enumerate(words) if w[0].isupper() and _base(w).lower() not in STOP_CAPS
                          and len(_base(w)) > 1}
-                g = _gender_of_words([w.lower() for w in words[1:]])
+                lows = {w.lower() for w in words[1:]}
+                f, m = bool(lows & SUBJECT_F), bool(lows & SUBJECT_M)
+                g = "f" if f and not m else "m" if m and not f else None
                 if len(names) == 1 and g:
                     votes[next(iter(names))][g] += 1
         for name, c in votes.items():
@@ -224,12 +239,12 @@ class SpeakerGuesser:
             return "f"
         if title and title[0].lower() in MALE_TITLES:
             return "m"
-        if key in self.learned:
-            return self.learned[key]
         if key in FEMALE_NAMES and key not in MALE_NAMES:
-            return "f"
+            return "f"                   # a common woman's name beats a guess from nearby pronouns
         if key in MALE_NAMES and key not in FEMALE_NAMES:
             return "m"
+        if key in self.learned:
+            return self.learned[key]
         return None
 
     # ------------------------------------------------------------------ paragraphs
@@ -396,6 +411,7 @@ class SpeakerGuesser:
     def speakers(self, paragraphs):
         """One (name, gender) per paragraph: who says the quotes in it. Either can be None."""
         out, recent = [], []
+        self.kinds = []                 # how each paragraph's speaker was found: name, ai, pron, subject, turn, runon
         last = {}                       # the woman and the man named most recently
         running_on = None
         paragraphs = list(paragraphs)
@@ -406,24 +422,30 @@ class SpeakerGuesser:
                 if _runs_on(p):
                     running_on = who
                 out.append(who)
+                self.kinds.append("runon")
                 recent.append(who)
                 continue
             if not QUOTE_RE.search(p) and not p.lstrip().startswith(("\u201c", '"')):
                 out.append((None, None))
+                self.kinds.append(None)
                 recent = []
                 self._remember(last, p)
                 continue
             narration = _narration(p)
             name, g = self._tag_speaker(narration, last)
+            kind = "name" if self._explicit else "pron" if self._pron else None
             ai = None if self._explicit else self._ai_tag(tags, i)
             if ai and self._pron and ai[1] and g and ai[1] != g:
                 ai = None               # the model named a man for "she said": trust the text
             if ai:                      # the language model read the scene; only an explicit tag beats it
                 name, g = ai[0], None if ai[0] == NARRATOR else ai[1] or (g if self._pron else None)
+                kind = "ai"
             if name is None and g is None:
                 name, g = self._subject_speaker(narration, last)
+                kind = "subject"
             if name is None and g is None and len(recent) >= 2:
                 name, g = recent[-2]    # speakers take turns
+                kind = "turn"
             if name and not g:
                 g = self.name_gender(name)
             self._remember(last, narration)
@@ -433,6 +455,7 @@ class SpeakerGuesser:
             if (name or g) and _runs_on(p):
                 running_on = who
             out.append(who)
+            self.kinds.append(kind)
             recent.append(who)
         return out
 
@@ -443,24 +466,46 @@ def _first_quote(paragraph):
     return q if len(q) <= 140 else q[:137].rsplit(" ", 1)[0] + "..."
 
 
-def find_characters(chapters, guesser=None, min_lines=2):
-    """[{"name", "lines", "gender", "example"}] for everyone who speaks at least min_lines times, most first."""
+def looks_like_fiction(chapters, share=0.15):
+    """True when the book reads like a story told in dialogue: at least `share` of its paragraphs are short lines
+    of speech. Measured on real books: novels 45 to 90 %, journalism and history with quotations 5 to 9 %."""
+    paras = [p for c in chapters for p in c.paragraphs]
+    if not paras:
+        return False
+    talk = sum(1 for p in paras if (QUOTE_RE.search(p) or p.lstrip().startswith(("\u201c", '"')))
+               and len(QUOTE_RE.sub("", p).split()) <= 12)
+    return talk / len(paras) >= share
+
+
+def find_characters(chapters, guesser=None, min_lines=2, keep=()):
+    """[{"name", "lines", "gender", "example"}] for everyone who speaks at least min_lines times, most first.
+    Someone only counts after CONFIRM_TAGS explicit speech tags ("said Rhys", or the AI's tags), so place names
+    and titles picked up by the looser guesses are not cast. Names in keep (chosen in Cast...) always count."""
     guesser = guesser or SpeakerGuesser(p for c in chapters for p in c.paragraphs)
-    lines, votes, example = Counter(), defaultdict(Counter), {}
+    lines, votes, example, sure = Counter(), defaultdict(Counter), {}, Counter()
     for ch in chapters:
-        for p, (name, g) in zip(ch.paragraphs, guesser.speakers(ch.paragraphs)):
+        who = guesser.speakers(ch.paragraphs)
+        for p, (name, g), kind in zip(ch.paragraphs, who, guesser.kinds):
             if not name or name == NARRATOR:
                 continue
             lines[name] += 1
-            if g:
+            if kind in ("name", "ai"):
+                sure[name] += 1
+            if g and kind in ("name", "ai", "pron"):
                 votes[name][g] += 1
             if name not in example and QUOTE_RE.search(p):
                 example[name] = _first_quote(p)
     out = []
+    keep = set(keep)
     for name, n in lines.most_common():
-        if n < min_lines:
-            break
-        g = guesser.name_gender(name) or (votes[name].most_common(1)[0][0] if votes[name] else None)
+        if n < min_lines and name not in keep:
+            continue
+        known = name.lower() in FEMALE_NAMES or name.lower() in MALE_NAMES or name in guesser.titles
+        if sure[name] < (1 if known else CONFIRM_TAGS) and name not in keep:
+            continue                     # a common first name needs one clear tag, anything else two
+        v = votes[name]
+        listed = guesser.name_gender(name)
+        g = listed or (v.most_common(1)[0][0] if v and v.most_common(1)[0][1] >= 0.75 * sum(v.values()) else None)
         title = guesser.titles.get(name)
         out.append({"name": name, "display": f"{title}. {name}" if title and title[-1] != "." and
                     title not in ("Sir", "Lady", "Lord", "King", "Queen", "Prince", "Princess", "Aunt", "Uncle")

@@ -59,8 +59,8 @@ fresh(); r = run(["cast.txt", "--out", "out_m"] + R, {"dialogue_voice": "cast"})
 sp = spoken()
 ok("Each character has their own voice" in r.stdout and "Tony (am_fenrir)" in r.stdout, "cast announced in the log")
 v_of = lambda text: next((v for v, t in sp if text in t), None)
-ok(v_of("You are late") == v_of("We are listening") == "af_nicole" and v_of("I am never late") == v_of("Never,") == "am_fenrir"
-   and v_of("Are you two done") == v_of("How wrong") == "af_kore", "each recurring character keeps their own voice")
+ok(v_of("You are late") == v_of("We are listening") == "af_kore" and v_of("I am never late") == v_of("Never,") == "am_fenrir"
+   and v_of("Are you two done") == v_of("How wrong") == "af_sarah", "each recurring character keeps their own voice")
 ok(v_of("The readings are wrong") == "am_michael", "a minor character uses the men's voice")
 os.makedirs("casting", exist_ok=True)
 Path("casting/cast.json").write_text(json.dumps({"voices": {"Tony": "am_puck", "Pepper": "af_sarah"}}))

@@ -3183,8 +3183,8 @@ class App:
                     ai = speakers.load_ai_tags(book_stem, CASTING_DIR) if ai_var.get() else None
                     if ai:
                         guesser.use_ai(ai)
-                    characters = speakers.find_characters(self.chapters, guesser)
                     chosen = {} if reset else speakers.load_cast(book_stem, CASTING_DIR)
+                    characters = speakers.find_characters(self.chapters, guesser, keep=chosen)
                     voices = speakers.cast(characters, narrator, female, male, chosen)
                 except Exception:  # noqa: BLE001
                     characters, voices = [], {}

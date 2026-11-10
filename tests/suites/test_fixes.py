@@ -77,4 +77,33 @@ killed.clear(); fake_app.stalled = False; fake_app.paused = True
 g.App.check_stalled(fake_app)
 ok(not killed, "a paused converter is never stopped")
 
+# ---------------------------------------------------------------- batch B: casting
+import speakers
+from epub_reader import Chapter
+paras = ["Jennifer looked at him.", "Jennifer handed him the keys.", "Jennifer watched his face.",
+         "\u201cGo,\u201d said Jennifer.", "\u201cNow,\u201d said Jennifer.", "\u201cFine,\u201d Jennifer said."]
+ok(speakers.SpeakerGuesser(paras).name_gender("Jennifer") == "f", "a woman's name is not turned male by a nearby 'him'")
+story = []
+for i in range(4):
+    story += ["Captain Lokken frowned at the screen.", "\u201cThat is not possible,\u201d said Lokken.",
+              "\u201cIt is,\u201d Rocky said. \u201cLook again.\u201d", "Earth was very far away now.",
+              "\u201cWe have to tell them,\u201d the Captain said.", "\u201cNo,\u201d said Rocky."]
+chs = [Chapter("One", story)]
+names = [c["name"] for c in speakers.find_characters(chs)]
+ok("Lokken" in names and "Rocky" in names and "Captain" not in names and "Earth" not in names,
+   f"titles and places are not cast, real speakers are: {names}")
+voices = speakers.cast([{"name": f"W{i}", "gender": "f", "lines": 9} for i in range(12)], "af_heart")
+ok(not any("af_nicole" in v for v in voices.values()), "the whispering voice (af_nicole) is never given to a character")
+ok("Zed" in [c["name"] for c in speakers.find_characters(chs + [Chapter("Two", ["\u201cHi,\u201d Zed said."])], keep={"Zed": "am_puck"})],
+   "a character chosen in Cast... is kept even with few tagged lines")
+nonfic = [("The committee met in March. " * 30) + "\u201cWe will not leave,\u201d the senator told reporters, according to the record."] * 20
+ok(not speakers.looks_like_fiction([Chapter("1", nonfic)]) and speakers.looks_like_fiction(chs),
+   "non-fiction with quotations is told apart from dialogue-heavy fiction")
+Path("nonfiction.txt").write_text("Chapter 1\n\n" + "\n\n".join(nonfic))
+Path("spoken.log").unlink(missing_ok=True)
+r = run(["nonfiction.txt", "--out", "out_nf", "--options", json.dumps({"dialogue_voice": "cast"})])
+spoken = {l.split("\t")[0] for l in Path("spoken.log").read_text().splitlines()} if Path("spoken.log").exists() else set()
+ok(r.returncode == 0 and "little dialogue" in r.stdout and spoken == {"af_heart"},
+   f"a non-fiction book keeps quotations in the narrator's voice: {spoken}")
+
 print(f"{sum(res)} passed, {len(res) - sum(res)} failed")
