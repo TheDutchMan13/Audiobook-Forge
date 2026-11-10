@@ -29,7 +29,8 @@ if (-not $iscc) { throw "Inno Setup was not found. Install it with:  winget inst
 Write-Host "Using $iscc"
 
 # 3. compile; if the result is too big for one file, build it as Setup.exe + Setup-1.bin instead
-$version = "1.0." + (Get-Date -Format "yyyyMMdd")
+$versionFile = Join-Path $app "VERSION"
+$version = if (Test-Path $versionFile) { (Get-Content $versionFile -TotalCount 1).Trim() } else { "1.0." + (Get-Date -Format "yyyyMMdd") }
 $iss = Join-Path $PSScriptRoot "AudiobookForge.iss"
 $args1 = @("/DAppSrc=$app", "/DAppVersion=$version", "/O$out", $iss)
 Write-Host "Compressing about 6 GB. This takes a while (often 15-40 minutes)..."

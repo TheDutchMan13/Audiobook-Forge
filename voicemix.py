@@ -12,6 +12,7 @@ import os
 import sys
 import warnings
 from pathlib import Path
+import checks
 
 HERE = Path(__file__).resolve().parent
 VOICES_DIR = HERE / "voices"
@@ -135,7 +136,7 @@ def speak(voice_or_pack, out_wav, text=SAMPLE):
     import numpy as np
     import soundfile as sf
     import torch
-    torch.backends.cudnn.enabled = False
+    checks.fast_gpu(torch)     # cuDNN off: the card's real speed (see checks.py)
     from kokoro import KPipeline
     import normalize
     pipe = KPipeline(lang_code="a", device="cuda" if torch.cuda.is_available() else "cpu")

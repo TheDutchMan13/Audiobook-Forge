@@ -22,6 +22,7 @@ import sys
 import time
 import warnings
 from pathlib import Path
+import checks
 
 HERE = Path(__file__).resolve().parent
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -36,7 +37,6 @@ if os.name == "nt":      # a program that cannot start must fail, not wait behin
 
 import numpy as np
 
-import checks
 
 RATE = 16000                 # what Whisper listens at
 MAX_CLIP = 28.0              # Whisper hears 30 s at a time; longer paragraphs are cut at a quiet moment
@@ -89,7 +89,7 @@ class Whisper:
 
     def __init__(self, model="base.en", half=False):
         import torch
-        torch.backends.cudnn.enabled = False
+        checks.fast_gpu(torch)     # cuDNN off: the card's real speed (see checks.py)
         from transformers import WhisperForConditionalGeneration, WhisperProcessor
         try:
             from transformers.utils import logging as hf_logging

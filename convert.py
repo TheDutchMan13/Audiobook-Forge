@@ -1440,7 +1440,7 @@ def main():
 
     if args.sample:                   # a short sample with the current settings, nothing else
         import torch
-        torch.backends.cudnn.enabled = False
+        checks.fast_gpu(torch)     # cuDNN off: the card's real speed (see checks.py)
         from kokoro import KPipeline
         device = "cuda" if torch.cuda.is_available() else "cpu"
         pipe = KPipeline(lang_code="a", device=device)
@@ -1482,7 +1482,7 @@ def main():
     import torch
     # MIOpen re-tunes for every new input length, which made real books ~40x slower.
     # Turning it off keeps ~25x realtime on the RX 9070 XT (measured with bench2.py).
-    torch.backends.cudnn.enabled = False
+    checks.fast_gpu(torch)     # cuDNN off: the card's real speed (see checks.py)
     from kokoro import KPipeline
     device = "cuda" if torch.cuda.is_available() else "cpu"
     half = bool(opts["half"]) and device == "cuda"

@@ -17,6 +17,8 @@ import time
 import warnings
 from pathlib import Path
 
+import checks  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HOME", str(HERE / "models"))
@@ -113,7 +115,7 @@ def check_gpu():
     except Exception:  # noqa: BLE001
         pass
     try:
-        torch.backends.cudnn.enabled = False
+        checks.fast_gpu(torch)     # cuDNN off: the card's real speed (see checks.py)
         x = torch.randn(512, 512, device="cuda")
         (x @ x).sum().item()
     except Exception as e:  # noqa: BLE001
@@ -207,7 +209,6 @@ def _size(path):
 
 
 def check_disk(cfg):
-    import checks
     out = []
     out_dir = Path(cfg.get("out_dir") or HERE / "output")
     for label, where in (("Program drive", HERE), ("Save folder drive", out_dir)):
@@ -264,7 +265,7 @@ def check_speech():
     """Say a test sentence on the graphics card and measure the speed (after a warm-up)."""
     try:
         import torch
-        torch.backends.cudnn.enabled = False
+        checks.fast_gpu(torch)     # cuDNN off: the card's real speed (see checks.py)
         from kokoro import KPipeline
         device = "cuda" if torch.cuda.is_available() else "cpu"
         pipe = KPipeline(lang_code="a", device=device)

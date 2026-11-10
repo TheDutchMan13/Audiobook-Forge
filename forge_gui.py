@@ -1691,6 +1691,13 @@ class App:
                 if not messagebox.askyesno("Audiobook Forge", problem + "\n\nConvert anyway?", icon="warning"):
                     return
                 cmd += ["--skip-checks"]
+        if not self.batch_active or self.batch_i == 0:
+            st = watchmod.read_status()
+            if st and st.get("state") == "converting" and not messagebox.askyesno(
+                    "Audiobook Forge", f"The watch folder is converting {st.get('current', 'a book')} right now. Two "
+                    "conversions share the graphics card and both slow down. Start anyway?", icon="warning"):
+                self.batch_active = False
+                return
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         try:
             GUI_BUSY.write_text(str(os.getpid()))        # the watch folder waits while the window converts

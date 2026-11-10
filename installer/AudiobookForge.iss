@@ -50,7 +50,7 @@ Name: "{app}"; Permissions: users-modify
 
 [Files]
 Source: "{#AppSrc}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; \
-  Excludes: "\work,\output,\logs,\bench,\pasted,\custom_covers,\casting,\themes,\installer,\models\previews,__pycache__,*.pyc,\settings.json,\pronunciations.json,\watcher.log,\watcher_status.json,\watcher.stop,\gui_busy.flag,\pause-*.flag,\*.epub,\*.wav,\forge_gui_old.py,\forge_gui_v2_backup.py,\tts_test.py,\check_gpu.py,\bench.py,\bench2.py,\*.partial.*"
+  Excludes: "\work,\output,\logs,\bench,\backup,\tests,\.git,\voices,\unins000.dat,\unins000.exe,\queue.json,\queue.tmp,\models\xet,\models\.agent_harnesses.json,\models\hub\models--Qwen*,\models\hub\models--openai*,\pasted,\custom_covers,\casting,\themes,\installer,\models\previews,__pycache__,*.pyc,\settings.json,\pronunciations.json,\watcher.log,\watcher_status.json,\watcher.stop,\gui_busy.flag,\pause-*.flag,\*.epub,\*.wav,\forge_gui_old.py,\forge_gui_v2_backup.py,\tts_test.py,\check_gpu.py,\bench.py,\bench2.py,\*.partial.*"
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"

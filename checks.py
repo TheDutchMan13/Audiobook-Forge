@@ -76,6 +76,14 @@ def ram_free():
     return None
 
 
+def fast_gpu(torch):
+    """Call before using the graphics card. MIOpen re-tunes itself for every new input length, which made real books
+    about 40x slower on the RX 9070 XT (0.6x realtime instead of about 25x). Turning cuDNN/MIOpen off is what makes
+    the card fast. Every file that loads a model calls this; never remove it."""
+    torch.backends.cudnn.enabled = False
+    return torch
+
+
 def gpu_free(torch):
     """(free, total) graphics memory in bytes, or None."""
     try:

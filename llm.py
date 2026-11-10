@@ -18,6 +18,8 @@ import time
 import warnings
 from pathlib import Path
 
+import checks  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HOME", str(HERE / "models"))
@@ -67,7 +69,7 @@ class LocalModel:
     def __init__(self, key="best", say=out):
         name, _, need_gb = MODELS.get(key, (key, key, 8.0))
         import torch
-        torch.backends.cudnn.enabled = False
+        checks.fast_gpu(torch)     # cuDNN off: the card's real speed (see checks.py)
         from transformers import AutoModelForCausalLM, AutoTokenizer
         try:
             from transformers.utils import logging as hf_logging
@@ -85,7 +87,6 @@ class LocalModel:
                 raise ModelError("The larger model needs one more small program (accelerate) to share the model between "
                                  f"the graphics card and system RAM. In PowerShell run:  {INSTALL}") from e
         if split:
-            import checks
             try:
                 free = torch.cuda.mem_get_info()[0] / 2**30
             except Exception:  # noqa: BLE001

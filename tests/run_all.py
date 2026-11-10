@@ -22,7 +22,7 @@ APP = TESTS.parent
 SUITES = [  # (file, needs a display, timeout seconds)
     ("run_tests.py", False, 900), ("run_new.py", False, 900), ("run_round.py", False, 900),
     ("run_more.py", False, 900), ("run_final.py", False, 900), ("t_check.py", False, 600),
-    ("test_ai.py", False, 300), ("test_norm.py", False, 300), ("test_watcher.py", False, 600), ("t_aiconv.py", False, 900), ("test_fixes.py", False, 900),
+    ("test_static.py", False, 120), ("test_ai.py", False, 300), ("test_norm.py", False, 300), ("test_watcher.py", False, 600), ("t_aiconv.py", False, 900), ("test_fixes.py", False, 900),
     ("tour.py", True, 1500),
 ]
 

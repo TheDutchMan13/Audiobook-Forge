@@ -61,8 +61,8 @@ def _gpu():
 
 
 def _ffmpeg():
-    exe = HERE / "bin" / "ffmpeg.exe"
-    cmd = str(exe) if exe.exists() else "ffmpeg"
+    import checks
+    cmd = checks.ffmpeg_path(HERE)          # the bundled copy only if it really starts, as the converter decides
     try:
         r = subprocess.run([cmd, "-hide_banner", "-version"], capture_output=True, text=True, timeout=30,
                            creationflags=0x08000000 if os.name == "nt" else 0)

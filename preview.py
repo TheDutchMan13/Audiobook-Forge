@@ -8,6 +8,7 @@ import os
 import sys
 import warnings
 from pathlib import Path
+import checks
 
 HERE = Path(__file__).resolve().parent
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -18,7 +19,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
-torch.backends.cudnn.enabled = False
+checks.fast_gpu(torch)     # cuDNN off: the card's real speed (see checks.py)
 from kokoro import KPipeline
 import normalize
 import voicemix
