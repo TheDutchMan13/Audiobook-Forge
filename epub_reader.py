@@ -17,7 +17,11 @@ SKIP_TITLES = (
     "notes", "index", "about the authors", "copyright", "contents",
     "timeline", "acknowledgments", "acknowledgements", "also by", "dedication",
 )
-MIN_CHARS = 1500  # ignore tiny pages (cover, part dividers, half-title)
+MIN_CHARS = 1500  # ignore tiny pages (cover, part dividers, half-title)...
+MIN_STORY_WORDS = 40     # ...unless it is a short prologue, epilogue or chapter with real text
+SPLIT_WORDS = 12000      # a document longer than this (about 80 minutes) is split at its headings
+JUNK_TITLES = {"pages", "page", "text", "untitled", "content", "contents1", "section", "body", "document", "chapter",
+               "main", "index", "default", "split", "html", "xhtml"}
 
 BLOCK_TAGS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote"}
 
@@ -195,6 +199,22 @@ def _doc_types(root):
     return types
 
 
+def junk_title(title):
+    """True for a 'title' that is really a file or anchor name: part0001, 51248-0012, index_split_003, Pages."""
+    t = (title or "").strip()
+    if not t:
+        return True
+    low = t.lower()
+    if low.endswith((".html", ".xhtml", ".htm", ".xml")):
+        return True
+    if low in JUNK_TITLES or re.fullmatch(r"(?:x?html?|page|pages|text|split|sect(?:ion)?)[\W_]*\d*", low):
+        return True
+    if " " not in t and re.search(r"\d", t) and re.search(r"[A-Za-z_\-]", t) and \
+            not re.fullmatch(r"(?:chapter|part|book|act)\d{1,3}", low):
+        return bool(re.search(r"\d{3,}|[_\-]\d|\d[_\-]|\.x?html?$", low) or re.fullmatch(r"[a-z]+\d+", low))
+    return False
+
+
 def _norm(s):
     return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
 
@@ -360,12 +380,17 @@ def read_epub(path, report=None):
             or _first_heading(root) or Path(href).stem
         title = html.unescape(title).strip()
 
-        paragraphs = []
+        paragraphs, heads = [], []
         for el in root.iter():
             if _local(el.tag) in BLOCK_TAGS and el not in skip_els:
                 text = _block_text(el)
                 if text:
+                    if _local(el.tag) in ("h1", "h2") and len(text) <= 120:
+                        heads.append(len(paragraphs))
                     paragraphs.append(text)
+        if junk_title(title):
+            better = _first_heading(root)
+            title = better if better and not junk_title(better) else ""
         nt = _norm(title)
         while paragraphs and len(paragraphs[0].split()) <= 12 and _norm(paragraphs[0]) and \
                 (_norm(paragraphs[0]) in nt or nt in _norm(paragraphs[0])):
@@ -373,10 +398,18 @@ def read_epub(path, report=None):
 
         types = _doc_types(root)
         if sum(len(p) for p in paragraphs) < MIN_CHARS:
-            continue
+            words = sum(len(p.split()) for p in paragraphs)
+            storyish = types & {"chapter", "prologue", "epilogue"} or \
+                re.search(r"\b(prologue|epilogue|chapter|interlude)\b", title, re.IGNORECASE)
+            if not (storyish and words >= MIN_STORY_WORDS):
+                if words >= MIN_STORY_WORDS:
+                    skip.append((title or Path(href).stem, f"short page ({words} words)"))
+                continue
         low = title.lower()
-        if any(s in low for s in SKIP_TITLES + SKIP_TITLES_EXTRA):
-            skip.append((title, "its title"))
+        chapterish = types & KEEP_TYPES - {"bodymatter"} or \
+            re.match(r"^\s*(?:chapter|part|book|prologue|epilogue|act|interlude|\d+\b)", low)
+        if not chapterish and any(s in low for s in SKIP_TITLES + SKIP_TITLES_EXTRA):
+            skip.append((title, "its title"))     # ("Chapter Six: Post-Credits Scene" was once dropped for "credits")
             continue
         if types & SKIP_TYPES and not types & KEEP_TYPES:
             skip.append((title, "marked as " + ", ".join(sorted(types & SKIP_TYPES))))
@@ -385,8 +418,39 @@ def read_epub(path, report=None):
         if reason:
             skip.append((title, reason))
             continue
-        chapters.append(Chapter(title, paragraphs, notes))
+        chapters.extend(split_long(title, paragraphs, heads, notes))
+    for n, ch in enumerate(chapters, 1):
+        if not ch.title:
+            ch.title = f"Chapter {n}"           # better read aloud than "part0001"
+    meta["skipped"] = list(skip)
     return meta, chapters
+
+
+def split_long(title, paragraphs, heads, notes):
+    """One document, or several chapters when it is very long and has headings inside (some books put a whole
+    part, or the whole book, in one file: one 150-minute "chapter" with no chapter marks in the audiobook)."""
+    words = sum(len(p.split()) for p in paragraphs)
+    cuts = [h for h in heads if h > 0]
+    if words <= SPLIT_WORDS or len(cuts) < 1:
+        return [Chapter(title, paragraphs, notes)]
+    bounds = [0] + cuts + [len(paragraphs)]
+    parts = []
+    for a, b in zip(bounds, bounds[1:]):
+        chunk = paragraphs[a:b]
+        if not chunk:
+            continue
+        if a in heads and len(chunk) > 1:
+            name, chunk = chunk[0], chunk[1:]
+        else:
+            name = title
+        if parts and sum(len(p.split()) for p in chunk) < 150:
+            parts[-1].paragraphs.extend(([name] if name != title else []) + chunk)   # a stray heading, not a chapter
+            continue
+        parts.append(Chapter(name, chunk, []))
+    if len(parts) < 2:
+        return [Chapter(title, paragraphs, notes)]
+    parts[-1].notes = notes                      # the document's notes are read after its last part
+    return parts
 
 
 def read_cover(path):

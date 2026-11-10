@@ -157,4 +157,46 @@ ok(g.App.unfinished_queue() is None, "a finished queue leaves nothing to resume"
 ok(checks.already_converted("bookA.txt") and not checks.already_converted("q0.txt"),
    "books converted before are recognised by their file (so re-dropping a folder skips them)")
 
+# ---------------------------------------------------------------- batch E: chapter names and long files
+import zipfile
+def make_epub(path, docs):
+    """docs: [(file name, toc label, body html)]"""
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        z.writestr("META-INF/container.xml", '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                   '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+        items = "".join(f'<item id="d{i}" href="{f}" media-type="application/xhtml+xml"/>' for i, (f, _, _) in enumerate(docs))
+        spine = "".join(f'<itemref idref="d{i}"/>' for i in range(len(docs)))
+        z.writestr("OEBPS/content.opf", '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                   '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Test Book</dc:title><dc:creator>Writer</dc:creator></metadata>'
+                   f'<manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>{items}</manifest><spine>{spine}</spine></package>')
+        links = "".join(f'<li><a href="{f}">{label}</a></li>' for f, label, _ in docs)
+        z.writestr("OEBPS/nav.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>'
+                   f'<nav epub:type="toc"><ol>{links}</ol></nav></body></html>')
+        for f, _, body in docs:
+            z.writestr(f"OEBPS/{f}", f'<html xmlns="http://www.w3.org/1999/xhtml"><body>{body}</body></html>')
+para = lambda n, w="words": "".join(f"<p>{'These are the ' + w + ' of a long paragraph in the story. ' * 12}</p>" for _ in range(n))
+giant = "".join(f"<h2>The {name} Campaign</h2>" + para(90, name) for name in ("Desert", "Air", "Ground", "Final"))
+make_epub("chapters.epub", [
+    ("part0000.xhtml", "part0000", "<h1>Prologue</h1><p>" + "A short opening scene that matters. " * 12 + "</p>"),
+    ("part0001.xhtml", "part0001", para(12)),
+    ("51248-0012.xhtml", "Pages", "<h1>The Long Night</h1>" + para(12, "night")),
+    ("big.xhtml", "Part Two", giant),
+    ("credits.xhtml", "Chapter Nine: Post-Credits Scene", para(10, "credits")),
+    ("copy.xhtml", "Copyright", "<p>Copyright 2020. All rights reserved. ISBN 123.</p>" + para(3, "legal")),
+])
+import epub_reader
+meta, chs = epub_reader.read_epub("chapters.epub")
+titles = [c.title for c in chs]
+ok(titles[:3] == ["Prologue", "Chapter 2", "The Long Night"], f"file names are not read as chapter titles: {titles[:3]}")
+ok("The Desert Campaign" in titles and "The Final Campaign" in titles and max(sum(len(p.split()) for p in c.paragraphs) for c in chs) < 12000,
+   f"a very long file is split at its headings: {titles}")
+ok("Chapter Nine: Post-Credits Scene" in titles, "a chapter whose title contains a skip word (credits) is kept")
+ok(any(t == "Copyright" for t, _ in meta["skipped"]), f"left-out sections are reported: {meta['skipped']}")
+r = run(["chapters.epub", "--out", "out_e"])
+ok(r.returncode == 0 and "Left out 1 section: Copyright" in r.stdout, "the log lists the sections that were left out")
+for t in ("part0001", "51248-0012", "Pages", "index_split_003", "text00012.xhtml"):
+    ok(epub_reader.junk_title(t), f"{t!r} is recognised as a file name")
+ok(not any(epub_reader.junk_title(t) for t in ("Chapter 1", "1984", "Prologue", "Part One", "The Long Night")), "real titles are kept")
+
 print(f"{sum(res)} passed, {len(res) - sum(res)} failed")

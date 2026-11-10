@@ -1394,6 +1394,11 @@ def main():
     except BookError as e:
         out(f"Could not read the book: {e}")
         sys.exit(2)
+    left_out = meta.pop("skipped", None)
+    if left_out and not args.worker and not args.sample:
+        shown = ", ".join(f"{t or 'an untitled section'} ({why})" for t, why in left_out[:10])
+        out(f"Left out {len(left_out)} section{'s' if len(left_out) != 1 else ''}: {shown}"
+            + (f" and {len(left_out) - 10} more" if len(left_out) > 10 else "") + ".")
     if args.title:
         meta["title"] = args.title
     elif not args.worker and title_mismatch(meta.get("title", ""), epub.stem):
