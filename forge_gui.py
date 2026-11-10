@@ -192,15 +192,15 @@ SOUND_OPTIONS = [
     ("room_tone", "Soft room tone",
      "A faint, natural background under the voice instead of dead digital silence in pauses. Some listeners prefer it.", False),
 ]
+# "fast" (faster mode) is no longer shown: measured on the RX 9070 XT it gave no gain. It still works if set.
 SPEED_OPTIONS = [
-    ("fast", "Faster mode (experimental)",
-     "Prepares the next sentences while the graphics card speaks the current one. The audio is identical. "
-     "If it ever fails, the conversion carries on in normal mode.", False),
-    ("half", "Half-precision math (experimental)",
-     "Lets the graphics card use lighter 16-bit math. It can be faster but may change the sound very slightly, so "
-     "compare by ear first. Falls back to full precision if anything goes wrong.", False),
-    ("parallel", "Two chapters at once (experimental)",
-     "Runs a second converter alongside the first. Uses more graphics memory. Helps only if the card is not already busy.", False),
+    ("half", "Half-precision math (about 1.8x faster)",
+     "Lighter 16-bit math on the graphics card. Measured on an RX 9070 XT: 37-39x realtime instead of 18-21x. It can "
+     "change the sound very slightly, so listen with Compare by ear below. Falls back to full precision if anything "
+     "goes wrong.", False),
+    ("parallel", "Two chapters at once",
+     "Runs a second converter beside the first: about a third faster with full precision on an RX 9070 XT, and more "
+     "graphics memory. Turned off by itself when memory is short.", False),
 ]
 QUALITY_OPTIONS = [(k, l, h) for k, l, h, _ in TEXT_OPTIONS + SOUND_OPTIONS]
 CHECKED, UNCHECKED = "☑", "☐"
@@ -1480,7 +1480,7 @@ class App:
         self.count_lbl.config(text=f"{len(self.selected)} of {len(self.chapters)} selected{extra}")
         kbps = QUALITIES.get((self.settings.get("output") or {}).get("quality", "standard"), (64, ""))[0]
         size_mb = audio_min * 60 * kbps * 1000 / 8 / 1e6
-        self.estimate_lbl.config(text=f"About {fmt_length(audio_min / SPEED_X)} to convert, about {size_mb:.0f} MB when finished")
+        self.estimate_lbl.config(text=f"About {fmt_length(audio_min / self.speed_x())} to convert, about {size_mb:.0f} MB when finished")
         self.start_btn.config(state="normal" if self.selected and not self.running else "disabled")
 
     # ------------------------------------------------------------ queue
@@ -1558,7 +1558,7 @@ class App:
         words = sum(c.words for _, _, chs in self.batch for c in chs)
         audio_min = words / WORDS_PER_MIN
         self.chips_lbl.config(text=f"{n} books in the queue\nabout {audio_min / 60:.1f} h of audio in total")
-        self.batch_est.config(text=f"About {fmt_length(audio_min / SPEED_X)} to convert everything")
+        self.batch_est.config(text=f"About {fmt_length(audio_min / self.speed_x())} to convert everything")
         self.batch_btn.config(text=f"Convert {n} books  →", state="normal")
 
     # ------------------------------------------------------------ running
@@ -1885,7 +1885,7 @@ class App:
             left = remaining_words / WORDS_PER_MIN * 60 / max(rate, 0.1)
             self.run_labels["speed"][1].config(text=f"{rate:.1f}x realtime")
         else:
-            left = remaining_words / WORDS_PER_MIN * 60 / SPEED_X
+            left = remaining_words / WORDS_PER_MIN * 60 / self.speed_x()
             self.run_labels["speed"][1].config(text="measuring...")
         self.run_labels["left"][1].config(text=fmt_length(left / 60) if left >= 60 else "under a minute")
         if self.running and self.assembling and not self.paused:
@@ -1922,6 +1922,7 @@ class App:
             self.note_crash(code)
         if ok:
             self.library_dirty = True
+            self.remember_speed()
         if self.batch_active and not self.cancelled:
             title = self.meta.get("title") or self.book.stem
             reason = None if ok else (self.problem or self.last_error or describe_exit(code))
@@ -2939,6 +2940,79 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------- samples
+    def compare_half(self, label):
+        """The listening check for half precision: the same passage, full precision (A) then half (B)."""
+        if self.sample_busy or self.running or not self.book or self.batch:
+            label.config(text="Load a single book first (and wait until nothing is converting).")
+            return
+        self.persist()
+        self.sample_busy = True
+        label.config(text="Making both samples... about a minute.")
+        env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+        base = [sys.executable, "-u", str(APP_DIR / "convert.py"), str(self.book), "--voice", self.voice_id(),
+                "--speed", f"{self.speed_var.get():.2f}"]
+        if self.selected and len(self.selected) != len(self.chapters):
+            base += ["--chapters", compress_ranges(self.selected)]
+        wavs = [PREVIEW_DIR / "_compare_full.wav", PREVIEW_DIR / "_compare_half.wav"]
+
+        def work():
+            made = []
+            for wav, half in zip(wavs, (False, True)):
+                try:
+                    wav.unlink()
+                except OSError:
+                    pass
+                try:
+                    subprocess.run(base + ["--sample", str(wav), "--options", json.dumps({"half": half})], cwd=APP_DIR,
+                                   env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                   creationflags=CREATE_NO_WINDOW, timeout=900)
+                except Exception:  # noqa: BLE001
+                    pass
+                made.append(wav.exists())
+            self.ui_q.put(lambda: play(made))
+
+        def length(wav):
+            import wave
+            try:
+                with wave.open(str(wav)) as w:
+                    return w.getnframes() / w.getframerate()
+            except Exception:  # noqa: BLE001
+                return 20.0
+
+        def play(made):
+            self.sample_busy = False
+            if not label.winfo_exists():
+                return
+            if not all(made):
+                label.config(text="The samples could not be made. Try Hear a sample on the main screen for details.")
+                return
+            label.config(text="Playing A: full precision...")
+            self.play_wav(wavs[0])
+            gap = int(length(wavs[0]) * 1000) + 1200
+            self.root.after(gap, lambda: label.winfo_exists() and (label.config(text="Playing B: half precision..."),
+                                                                     self.play_wav(wavs[1])))
+            self.root.after(gap + int(length(wavs[1]) * 1000) + 500, lambda: label.winfo_exists() and label.config(
+                text="Done. If B sounded the same as A, half precision is safe to keep on."))
+        threading.Thread(target=work, daemon=True).start()
+
+    def speed_x(self):
+        """Realtime factor for estimates: what the last conversions really ran at, else a typical value."""
+        try:
+            return max(2.0, float(self.settings.get("measured_x") or SPEED_X))
+        except (TypeError, ValueError):
+            return SPEED_X
+
+    def remember_speed(self):
+        """After a finished book: keep a smoothed realtime factor (audio length / time taken) for estimates."""
+        audio = self.total_audio_sec or 0
+        took = self.active_seconds()
+        if audio < 300 or took < 30:
+            return
+        x = audio / took
+        old = self.settings.get("measured_x")
+        self.settings["measured_x"] = round(x if not old else 0.6 * float(old) + 0.4 * x, 1)
+        save_settings(self.settings)
+
     def book_sample(self, at=None, status=None, done_cb=None):
         """Read a short stretch of the loaded book with every current setting (voice, speed, fixes, dialogue
         voices, sound options) and play it. at: "chapter:paragraph" for one paragraph; otherwise about a
@@ -4103,11 +4177,19 @@ class App:
             self.ui_q.put(lambda: work_lbl.winfo_exists() and work_lbl.config(text=f"{total / 1e9:.1f} GB in use"))
         threading.Thread(target=sized, daemon=True).start()
 
-        box = ttk.LabelFrame(speed_body, text="Speed (experimental)", padding=12)
+        box = ttk.LabelFrame(speed_body, text="Speed", padding=12)
         box.pack(fill="x")
         self.option_switches(box, SPEED_OPTIONS, wrap)
-        ttk.Label(speed_body, text="To see which of these help on this PC, run bench3.py from the Audiobook-Forge folder. "
-                                   "Each one turns itself off for the rest of a conversion if it ever fails.",
+        crow = ttk.Frame(box)
+        crow.pack(anchor="w", pady=(12, 0))
+        ttk.Button(crow, text="Compare by ear", command=lambda: self.compare_half(cmp_lbl)).pack(side="left")
+        cmp_lbl = ttk.Label(crow, text="Reads the same passage of the loaded book with full and then half precision.",
+                            foreground="gray", wraplength=int(wrap * 0.75))
+        cmp_lbl.pack(side="left", padx=(10, 0))
+        measured = self.settings.get("measured_x")
+        ttk.Label(speed_body, text=(f"Your last conversions ran at about {measured:.0f}x realtime. " if measured else "") +
+                  "Each option turns itself off for the rest of a conversion if it ever fails. "
+                  "bench3.py in the Audiobook-Forge folder measures them on this PC.",
                   foreground="gray", wraplength=wrap).pack(anchor="w", pady=(12, 0))
         for b in (body, sound_body, speed_body):
             ttk.Label(b, text="Changes apply to the next conversion. Only paragraphs affected by a change are read again.",

@@ -1522,7 +1522,7 @@ def main():
         if opts["half"] and device != "cuda":
             out("Half precision needs the graphics card; using full precision.")
         if modes:
-            out("Experimental: " + ", ".join(modes) + ".")
+            out("Speed: " + ", ".join(modes) + ".")
         out(f"Converting {len(picked)} of {len(chapters)} chapters. First chapter includes ~1 minute GPU warm-up.")
     if opts["parallel"] and not args.worker and len(todo) >= 2:
         second = start_second_process()
